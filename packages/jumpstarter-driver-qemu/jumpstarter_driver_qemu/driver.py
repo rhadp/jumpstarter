@@ -74,18 +74,20 @@ class QemuPower(PowerInterface, Driver):
 
         cpu = self.parent.cpu
 
-        if self.parent.arch == platform.machine():
-            cmdline = [
-                "qemu-kvm",
-                "-nodefaults",
-                "-nographic",
-            ]
+        # Determine QEMU binary path
+        if self.parent.arch == platform.machine() and os.access("/dev/kvm", os.R_OK | os.W_OK):
+            # Try common locations for qemu-kvm
+            for qemu_binary in ["/usr/libexec/qemu-kvm", "/usr/bin/qemu-kvm", "qemu-kvm"]:
+                if Path(qemu_binary).exists() or "/" not in qemu_binary:
+                    break
         else:
-            cmdline = [
-                f"qemu-system-{self.parent.arch}",
-                "-nodefaults",
-                "-nographic",
-            ]
+            qemu_binary = f"qemu-system-{self.parent.arch}"
+
+        cmdline = [
+            qemu_binary,
+            "-nodefaults",
+            "-nographic",
+        ]
 
         if self.parent.arch == platform.machine() and os.access("/dev/kvm", os.R_OK | os.W_OK):
             cmdline += [
