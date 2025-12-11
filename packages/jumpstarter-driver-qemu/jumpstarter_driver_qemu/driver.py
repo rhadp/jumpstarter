@@ -74,11 +74,18 @@ class QemuPower(PowerInterface, Driver):
 
         cpu = self.parent.cpu
 
-        cmdline = [
-            f"qemu-system-{self.parent.arch}",
-            "-nodefaults",
-            "-nographic",
-        ]
+        if self.parent.arch == platform.machine():
+            cmdline = [
+                "qemu-kvm",
+                "-nodefaults",
+                "-nographic",
+            ]
+        else:
+            cmdline = [
+                f"qemu-system-{self.parent.arch}",
+                "-nodefaults",
+                "-nographic",
+            ]
 
         if self.parent.arch == platform.machine() and os.access("/dev/kvm", os.R_OK | os.W_OK):
             cmdline += [
