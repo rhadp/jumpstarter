@@ -29,14 +29,8 @@ from jumpstarter.driver import Driver, export
 from jumpstarter.streams.encoding import AutoDecompressIterator
 
 
-def _vsock_available(socket_path: str = "/dev/vhost-vsock") -> bool:
-    if platform.system() != "Linux":
-        return False
-
-    if not os.path.exists(socket_path):
-        return False
-
-    return os.access(socket_path, os.R_OK | os.W_OK)
+def _vsock_available():
+    return platform.system() == "Linux"
 
 
 class QmpLogFilter(logging.Filter):
@@ -88,8 +82,17 @@ class QemuPower(PowerInterface, Driver):
 
         cpu = self.parent.cpu
 
+        # Determine QEMU binary path
+        if self.parent.arch == platform.machine() and os.access("/dev/kvm", os.R_OK | os.W_OK):
+            # Try common locations for qemu-kvm
+            for qemu_binary in ["/usr/libexec/qemu-kvm", "/usr/bin/qemu-kvm", "qemu-kvm"]:
+                if Path(qemu_binary).exists() or "/" not in qemu_binary:
+                    break
+        else:
+            qemu_binary = f"qemu-system-{self.parent.arch}"
+
         cmdline = [
-            f"qemu-system-{self.parent.arch}",
+            qemu_binary,
             "-nodefaults",
             "-nographic",
         ]
@@ -222,10 +225,48 @@ class QemuPower(PowerInterface, Driver):
             ]
 
         self._cidata = self.parent.cidata()
+        
+        # Create ISO image from cidata directory for cloud-init
+        # This is more compatible than vvfat which may not be available in qemu-kvm
+        self._cidata_iso = Path(self._cidata.name).parent / "cidata.iso"
+        
+        # Try different ISO creation tools in order of preference
+        iso_tools = ["genisoimage", "mkisofs", "xorriso"]
+        iso_cmd = None
+        for tool in iso_tools:
+            try:
+                await run_process([tool, "--version"], stdout=PIPE, stderr=PIPE)
+                if tool == "xorriso":
+                    iso_cmd = [
+                        tool, "-as", "mkisofs",
+                        "-output", str(self._cidata_iso),
+                        "-volid", "CIDATA",
+                        "-joliet", "-rock",
+                        self._cidata.name
+                    ]
+                else:
+                    iso_cmd = [
+                        tool,
+                        "-output", str(self._cidata_iso),
+                        "-volid", "CIDATA",
+                        "-joliet", "-rock",
+                        self._cidata.name
+                    ]
+                break
+            except (CalledProcessError, FileNotFoundError):
+                continue
+        
+        if iso_cmd is None:
+            raise RuntimeError(
+                "No ISO creation tool found. Please install one of: genisoimage, mkisofs, or xorriso"
+            )
+        
+        # Create the ISO image
+        await run_process(iso_cmd, stdout=PIPE, stderr=PIPE)
 
         cmdline += [
             "-blockdev",
-            f"driver=vvfat,node-name=cidata,read-only=on,dir={self._cidata.name},label=CIDATA",
+            f"driver=raw,node-name=cidata,file.driver=file,file.filename={self._cidata_iso}",
             "-device",
             "virtio-blk-pci,drive=cidata",
         ]
@@ -267,6 +308,10 @@ class QemuPower(PowerInterface, Driver):
 
         if hasattr(self, "_cidata"):
             del self._cidata
+        
+        if hasattr(self, "_cidata_iso"):
+            Path(self._cidata_iso).unlink(missing_ok=True)
+            del self._cidata_iso
 
     @export
     async def read(self) -> AsyncGenerator[PowerReading, None]:
