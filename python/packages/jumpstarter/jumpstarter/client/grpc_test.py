@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from io import StringIO
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from rich.console import Console
 from rich.table import Table
@@ -374,3 +374,136 @@ class TestExporterList:
         assert "my-client" in output
         assert "Scheduled" in output
         assert "2023-01-01 11:00:00" in output  # begin_time (10:00) + duration (1h)
+
+
+class TestLeaseRichDisplay:
+    def create_lease(
+        self,
+        name="test-lease",
+        selector="env=test",
+        duration=timedelta(hours=1),
+        effective_duration=None,
+        begin_time=None,
+        effective_begin_time=None,
+        effective_end_time=None,
+        client="test-client",
+        exporter="test-exporter",
+    ):
+        return Lease(
+            namespace="default",
+            name=name,
+            selector=selector,
+            duration=duration,
+            effective_duration=effective_duration,
+            begin_time=begin_time,
+            effective_begin_time=effective_begin_time,
+            effective_end_time=effective_end_time,
+            client=client,
+            exporter=exporter,
+            conditions=[],
+        )
+
+    def test_rich_add_columns_has_expires_at_and_remaining(self):
+        table = Table()
+        Lease.rich_add_columns(table)
+        columns = [col.header for col in table.columns]
+        assert columns == ["NAME", "SELECTOR", "EXPIRES AT", "REMAINING", "CLIENT", "EXPORTER"]
+
+    def test_rich_add_columns_excludes_begin_time_and_duration(self):
+        table = Table()
+        Lease.rich_add_columns(table)
+        columns = [col.header for col in table.columns]
+        assert "BEGIN TIME" not in columns
+        assert "DURATION" not in columns
+
+    def test_compute_expires_at_from_effective_end_time(self):
+        lease = self.create_lease(
+            effective_end_time=datetime(2023, 1, 1, 11, 0, 0),
+        )
+        assert lease._compute_expires_at() == datetime(2023, 1, 1, 11, 0, 0)
+
+    def test_compute_expires_at_from_effective_begin_and_duration(self):
+        lease = self.create_lease(
+            effective_begin_time=datetime(2023, 6, 15, 14, 30, 0),
+            duration=timedelta(hours=2),
+        )
+        assert lease._compute_expires_at() == datetime(2023, 6, 15, 16, 30, 0)
+
+    def test_compute_expires_at_from_begin_time_and_duration(self):
+        lease = self.create_lease(
+            begin_time=datetime(2023, 3, 10, 8, 0, 0),
+            duration=timedelta(minutes=30),
+        )
+        assert lease._compute_expires_at() == datetime(2023, 3, 10, 8, 30, 0)
+
+    def test_compute_expires_at_none_when_no_begin_time(self):
+        lease = self.create_lease()
+        assert lease._compute_expires_at() is None
+
+    def test_format_remaining_expired(self):
+        past = datetime(2020, 1, 1, 0, 0, 0)
+        assert Lease._format_remaining(past) == "expired"
+
+    def test_format_remaining_none(self):
+        assert Lease._format_remaining(None) == ""
+
+    def test_format_remaining_days_hours_minutes(self):
+        now = datetime(2023, 1, 1, 0, 0, 0)
+        expires_at = datetime(2023, 1, 3, 3, 45, 0)
+        with patch("jumpstarter.client.grpc.datetime", wraps=datetime) as mock_dt:
+            mock_dt.now.return_value = now
+            assert Lease._format_remaining(expires_at) == "2d 3h 45m"
+
+    def test_format_remaining_hours_and_minutes(self):
+        now = datetime(2023, 1, 1, 0, 0, 0)
+        expires_at = datetime(2023, 1, 1, 5, 30, 0)
+        with patch("jumpstarter.client.grpc.datetime", wraps=datetime) as mock_dt:
+            mock_dt.now.return_value = now
+            assert Lease._format_remaining(expires_at) == "5h 30m"
+
+    def test_format_remaining_minutes_only(self):
+        now = datetime(2023, 1, 1, 0, 0, 0)
+        expires_at = datetime(2023, 1, 1, 0, 15, 0)
+        with patch("jumpstarter.client.grpc.datetime", wraps=datetime) as mock_dt:
+            mock_dt.now.return_value = now
+            assert Lease._format_remaining(expires_at) == "15m"
+
+    def test_format_remaining_zero_minutes_shows_0m(self):
+        now = datetime(2023, 1, 1, 0, 0, 0)
+        expires_at = datetime(2023, 1, 1, 0, 0, 30)
+        with patch("jumpstarter.client.grpc.datetime", wraps=datetime) as mock_dt:
+            mock_dt.now.return_value = now
+            assert Lease._format_remaining(expires_at) == "0m"
+
+    def test_format_remaining_days_only(self):
+        now = datetime(2023, 1, 1, 0, 0, 0)
+        expires_at = datetime(2023, 1, 4, 0, 0, 0)
+        with patch("jumpstarter.client.grpc.datetime", wraps=datetime) as mock_dt:
+            mock_dt.now.return_value = now
+            assert Lease._format_remaining(expires_at) == "3d"
+
+    def test_rich_add_rows_shows_expires_at(self):
+        lease = self.create_lease(
+            effective_begin_time=datetime(2023, 1, 1, 10, 0, 0),
+            effective_end_time=datetime(2023, 1, 1, 11, 0, 0),
+        )
+        table = Table()
+        Lease.rich_add_columns(table)
+        lease.rich_add_rows(table)
+
+        console = Console(file=StringIO(), width=200)
+        console.print(table)
+        output = console.file.getvalue()
+        assert "2023-01-01 11:00:00" in output
+
+    def test_rich_add_rows_empty_when_no_timing_data(self):
+        lease = self.create_lease()
+        table = Table()
+        Lease.rich_add_columns(table)
+        lease.rich_add_rows(table)
+
+        console = Console(file=StringIO(), width=200)
+        console.print(table)
+        output = console.file.getvalue()
+        assert "test-lease" in output
+        assert "test-client" in output
