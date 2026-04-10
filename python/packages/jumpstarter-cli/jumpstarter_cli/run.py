@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 import signal
 import sys
 
@@ -247,14 +248,22 @@ def _serve_with_exc_handling(
     default=None,
     help="Require this passphrase from clients connecting via --tls-grpc-listener.",
 )
+@click.option(
+    "--unsafe-no-auth",
+    "unsafe_no_auth",
+    is_flag=True,
+    help="Disable authentication for --tls-grpc-listener (DANGEROUS: allows unauthenticated access).",
+)
 @handle_exceptions
-def run(config, listener_bind, tls_insecure, tls_cert, tls_key, passphrase):
+def run(config, listener_bind, tls_insecure, tls_cert, tls_key, passphrase, unsafe_no_auth):
     """Run an exporter locally."""
+    if unsafe_no_auth and passphrase:
+        raise click.UsageError("--unsafe-no-auth and --passphrase are mutually exclusive")
     if listener_bind is not None and config is None:
         raise click.UsageError("--exporter-config (or --exporter) is required when using --tls-grpc-listener")
-    if listener_bind is None and (tls_insecure or tls_cert or tls_key or passphrase):
+    if listener_bind is None and (tls_insecure or tls_cert or tls_key or passphrase or unsafe_no_auth):
         raise click.UsageError(
-            "--tls-grpc-insecure, --tls-cert, --tls-key, and --passphrase require --tls-grpc-listener"
+            "--tls-grpc-insecure, --tls-cert, --tls-key, --passphrase, and --unsafe-no-auth require --tls-grpc-listener"
         )
     if listener_bind is not None:
         if tls_insecure and (tls_cert or tls_key):
@@ -263,5 +272,13 @@ def run(config, listener_bind, tls_insecure, tls_cert, tls_key, passphrase):
             raise click.UsageError(
                 "--tls-grpc-listener requires either --tls-grpc-insecure or --tls-cert and --tls-key"
             )
+        if unsafe_no_auth:
+            click.echo(
+                "WARNING: --unsafe-no-auth is set; the gRPC server will accept connections without authentication",
+                err=True,
+            )
+        elif not passphrase:
+            passphrase = secrets.token_urlsafe(32)
+            click.echo(f"INFO: No --passphrase provided; auto-generated passphrase: {passphrase}", err=True)
     parsed_bind = _parse_listener_bind(listener_bind) if listener_bind is not None else None
     return _serve_with_exc_handling(config, parsed_bind, tls_insecure, tls_cert, tls_key, passphrase)
